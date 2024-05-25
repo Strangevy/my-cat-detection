@@ -1,20 +1,36 @@
-# My Project
+# My Cat Detection
 
-这是一个基于 Flask 的对象检测视频流项目。
+As the project name suggests, this project detects objects that are my cats.
 
-## 安装
+Based on the YOLOv8n model and trained with my cat dataset.
 
-1. 克隆仓库：
-   ```bash
-   git clone https://github.com/yourusername/my_project.git
-   cd my_project
+Just for them.
 
+## Installation
 
-python -m venv venv
-source venv/bin/activate  # 对于 Windows，使用 `venv\Scripts\activate`
+1. Clone the Repository:
+   ```
+   git clone https://github.com/Strangevy/my-cat-detection.git
+   cd my-cat-detection
+   ```
 
+2. Create a Virtual Environment:
+   ```
+   python3 -m venv venv
+   source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
+   ```
 
-pip install -r requirements.txt
+3. Install Dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
 
+4. Run the Application:
+   ```
+   python app.py
+   ```
 
-python app.py
+5. Exit the virtual environment
+   ```
+   deactivate
+   ```

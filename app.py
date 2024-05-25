@@ -1,66 +1,92 @@
 import os
 import cv2
 from flask import Flask, render_template, Response
-from flask_uploads import UploadSet, IMAGES, configure_uploads
+# from flask_uploads import UploadSet, IMAGES, configure_uploads  # 不再需要这个导入
 from ultralytics import YOLO
+from PIL import Image, ImageDraw, ImageFont
+from werkzeug.utils import secure_filename  # 直接从 werkzeug 导入
+from werkzeug.datastructures import FileStorage  # 直接从 werkzeug 导入
+import numpy as np
 
-# Flask 应用程序设置
+# Flask application settings
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'supersecretkey'
 app.config['UPLOADED_IMAGES_DEST'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 限制上传大小为16MB
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Limit upload size to 16MB
 
-# 图片上传配置
-images = UploadSet('images', IMAGES)
-configure_uploads(app, images)
+# Image upload configuration
+# images = UploadSet('images', IMAGES)  # 不再需要这个配置
+# configure_uploads(app, images)  # 不再需要这个配置
 
-# 加载 YOLO 模型
-# model = YOLO('best.pt')  # 修改为您的模型路径
-model = YOLO('yolov8n.pt')  # 修改为您的模型路径
+# Load YOLO model
+model = YOLO('best.pt')  # Change to your model path
 
-# DroidCam视频流URL
-stream_url = 'http://192.168.233.160:4747/video'
+# DroidCam video stream URL
+stream_url = os.environ.get('STREAM_URL', 'http://192.168.233.160:4747/video')
+
+# Set Chinese font
+font_path = "./fonts/NotoSansSC-Regular.ttf"  # Replace this path with the path to your downloaded Chinese font file
+font_size = 20
+font = ImageFont.truetype(font_path, font_size)
 
 @app.route('/')
 def index():
-    """视频流首页."""
+    """Video stream homepage."""
     return render_template('index.html')
 
+def draw_chinese_text(image, text, position, font, color=(255, 0, 0)):
+    """Draw Chinese text on an image."""
+    img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil)
+    draw.text(position, text, font=font, fill=color)
+    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
 def gen():
-    """视频流生成器函数."""
+    """Video stream generator function."""
     cap = cv2.VideoCapture(stream_url)
+    if not cap.isOpened():
+        print("Error: Could not open video stream.")
+        return
+
     while True:
         ret, frame = cap.read()
         if not ret:
+            print("Error: Failed to read frame from stream.")
             break
 
-        # 进行对象检测
-        results = model(frame)  # 使用模型对象的预测方法
+        # Perform object detection
+        results = model(frame)
 
-        for result in results:  # 迭代每个检测结果
-            if result.boxes is not None and len(result.boxes) > 0:  # 检查是否有检测到的对象
-                for box in result.boxes:  # 每个检测结果是一个字典，包含检测到的对象信息
-                    if len(box.xyxy) == 4:  # 检查边界框是否具有四个值
-                        x_min, y_min, x_max, y_max = box.xyxy  # 获取坐标信息
-                        conf = float(box.conf)  # 获取置信度
-                        cls = int(box.cls)  # 获取类别标签
+        for result in results:
+            if result.boxes is not None and len(result.boxes) > 0:
+                for box in result.boxes:
+                    x_min, y_min, x_max, y_max = map(int, box.xyxy[0])
+                    conf = box.conf[0].item()
+                    cls = int(box.cls[0].item())
 
-                        label = f'{result.names[cls]} {conf:.2f}'
+                    label = f'{model.names[cls]} {conf:.2f}'
 
-                        # 在帧上绘制边界框
-                        cv2.rectangle(frame, (int(x_min), int(y_min)), (int(x_max), int(y_max)), (255, 0, 0), 2)
-                        cv2.putText(frame, label, (int(x_min), int(y_min) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 0, 0), 2)
+                    # Draw bounding box on the frame
+                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
+                    
+                    # Draw Chinese label on the frame
+                    frame = draw_chinese_text(frame, label, (x_min, y_min - 10), font)
 
         ret, buffer = cv2.imencode('.jpg', frame)
+        if not ret:
+            print("Error: Failed to encode frame.")
+            break
+
         frame = buffer.tobytes()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
-
 @app.route('/video_feed')
 def video_feed():
-    """视频流路由，将此路由放入img标签的src属性中."""
+    """Video stream route, put this route in the src attribute of an img tag."""
     return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    debug_mode = os.environ.get('DEBUG', 'False') == 'True'
+    print(debug_mode)
+    app.run(host='0.0.0.0', port=5000, debug=debug_mode)
