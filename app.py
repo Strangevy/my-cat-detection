@@ -1,92 +1,114 @@
 import os
 import cv2
-from flask import Flask, render_template, Response
-# from flask_uploads import UploadSet, IMAGES, configure_uploads  # 不再需要这个导入
+import time
+import threading
+import logging
+from collections import Counter
 from ultralytics import YOLO
-from PIL import Image, ImageDraw, ImageFont
-from werkzeug.utils import secure_filename  # 直接从 werkzeug 导入
-from werkzeug.datastructures import FileStorage  # 直接从 werkzeug 导入
-import numpy as np
+import requests
+from contextlib import contextmanager
 
-# Flask application settings
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'supersecretkey'
-app.config['UPLOADED_IMAGES_DEST'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Limit upload size to 16MB
+# Load environment variables (assuming they are set correctly)
+model_path = os.getenv("MODEL_PATH")
+stream_url = os.getenv("STREAM_URL")
+telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
+telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
-# Image upload configuration
-# images = UploadSet('images', IMAGES)  # 不再需要这个配置
-# configure_uploads(app, images)  # 不再需要这个配置
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# 设置 ultralytics 的日志级别为 WARNING，这样 INFO 和更低级别的日志（比如 DEBUG）将不会被打印
+ultralytics_logger = logging.getLogger('ultralytics')
+ultralytics_logger.setLevel(logging.WARNING)
 
 # Load YOLO model
-model = YOLO('best.pt')  # Change to your model path
+model = YOLO(model_path)
 
-# DroidCam video stream URL
-stream_url = os.environ.get('STREAM_URL', 'http://192.168.233.160:4747/video')
+@contextmanager
+def open_video_capture(url):
+    """Context manager to open and release video capture."""
+    cap = cv2.VideoCapture(url)
+    try:
+        yield cap
+    finally:
+        cap.release()
 
-# Set Chinese font
-font_path = "./fonts/NotoSansSC-Regular.ttf"  # Replace this path with the path to your downloaded Chinese font file
-font_size = 20
-font = ImageFont.truetype(font_path, font_size)
+def telegram_message(message):
+    """Sends a message to the Telegram bot."""
+    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+    payload = {'chat_id': telegram_chat_id, 'text': message}
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        logging.info("Message sent successfully.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error sending message: {e}")
 
-@app.route('/')
-def index():
-    """Video stream homepage."""
-    return render_template('index.html')
+class ObjectDetector(threading.Thread):
+    """Thread class for video processing and reporting."""
 
-def draw_chinese_text(image, text, position, font, color=(255, 0, 0)):
-    """Draw Chinese text on an image."""
-    img_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img_pil)
-    draw.text(position, text, font=font, fill=color)
-    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    def __init__(self):
+        super().__init__()
+        self.stop_event = threading.Event()
+        self.detection_counter = Counter()
+        self.lock = threading.Lock()
 
-def gen():
-    """Video stream generator function."""
-    cap = cv2.VideoCapture(stream_url)
-    if not cap.isOpened():
-        print("Error: Could not open video stream.")
-        return
+    def run(self):
+        with open_video_capture(stream_url) as cap:
+            retry_count = 0
+            max_retries = 3
+            while not self.stop_event.is_set():
+                ret, frame = cap.read()
+                if not ret:
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        logging.error("Maximum retries exceeded. Exiting.")
+                        break
+                    logging.error("Error: Failed to read frame from stream. Reconnecting...")
+                    time.sleep(5)
+                    continue
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Failed to read frame from stream.")
-            break
+                # Perform object detection
+                results = model(frame)
 
-        # Perform object detection
-        results = model(frame)
+                for result in results:
+                    if result.boxes is not None and len(result.boxes) > 0:
+                        with self.lock:
+                            for box in result.boxes:
+                                cls = int(box.cls[0].item())
+                                label = model.names[cls]
+                                self.detection_counter[label] += 1
 
-        for result in results:
-            if result.boxes is not None and len(result.boxes) > 0:
-                for box in result.boxes:
-                    x_min, y_min, x_max, y_max = map(int, box.xyxy[0])
-                    conf = box.conf[0].item()
-                    cls = int(box.cls[0].item())
+        logging.info("Video processing thread stopped.")
 
-                    label = f'{model.names[cls]} {conf:.2f}'
+    def report_detections(self):
+        while not self.stop_event.is_set():
+            time.sleep(60)
+            if self.detection_counter:
+                # Filter detections that occurred at least 3 times
+                filtered_detections = {label: count for label, count in self.detection_counter.items() if count >= 3}
+                if filtered_detections:
+                    sorted_detections = sorted(filtered_detections.items(), key=lambda item: item[1], reverse=True)
+                    message = "Object detection report:\n\n" + "\n".join([f"{label}: {count}" for label, count in sorted_detections])
+                    logging.info("Info:"+message)
+                    telegram_message(message)
+                with self.lock:
+                    self.detection_counter.clear()
 
-                    # Draw bounding box on the frame
-                    cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (255, 0, 0), 2)
-                    
-                    # Draw Chinese label on the frame
-                    frame = draw_chinese_text(frame, label, (x_min, y_min - 10), font)
+    def stop(self):
+        self.stop_event.set()
 
-        ret, buffer = cv2.imencode('.jpg', frame)
-        if not ret:
-            print("Error: Failed to encode frame.")
-            break
+def main():
+    """Main function."""
+    try:
+        detector = ObjectDetector()
+        detector.start()
+        detector.report_detections()  # Start reporting thread within main thread for simplicity
+        detector.join()  # Wait for detector thread to finish
+    except Exception as e:
+        logging.exception(f"An unexpected error occurred: {e}")
+    finally:
+        logging.info("Stopping...")
 
-        frame = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-@app.route('/video_feed')
-def video_feed():
-    """Video stream route, put this route in the src attribute of an img tag."""
-    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-if __name__ == '__main__':
-    debug_mode = os.environ.get('DEBUG', 'False') == 'True'
-    print(debug_mode)
-    app.run(host='0.0.0.0', port=5000, debug=debug_mode)
+if __name__ == "__main__":
+    main()
