@@ -17,7 +17,6 @@ telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 设置 ultralytics 的日志级别为 WARNING，这样 INFO 和更低级别的日志（比如 DEBUG）将不会被打印
 ultralytics_logger = logging.getLogger('ultralytics')
 ultralytics_logger.setLevel(logging.WARNING)
 
@@ -35,6 +34,7 @@ def open_video_capture(url):
 
 def telegram_message(message):
     """Sends a message to the Telegram bot."""
+    logging.info("message:"+message)
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
     payload = {'chat_id': telegram_chat_id, 'text': message}
     try:
@@ -65,11 +65,12 @@ class ObjectDetector(threading.Thread):
                         logging.error("Maximum retries exceeded. Exiting.")
                         break
                     logging.error("Error: Failed to read frame from stream. Reconnecting...")
-                    time.sleep(5)
                     continue
 
                 # Perform object detection
                 results = model(frame)
+                
+                time.sleep(5)
 
                 for result in results:
                     if result.boxes is not None and len(result.boxes) > 0:
@@ -90,7 +91,6 @@ class ObjectDetector(threading.Thread):
                 if filtered_detections:
                     sorted_detections = sorted(filtered_detections.items(), key=lambda item: item[1], reverse=True)
                     message = "Object detection report:\n\n" + "\n".join([f"{label}: {count}" for label, count in sorted_detections])
-                    logging.info("Info:"+message)
                     telegram_message(message)
                 with self.lock:
                     self.detection_counter.clear()
