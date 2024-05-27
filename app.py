@@ -34,7 +34,6 @@ def open_video_capture(url):
 
 def telegram_message(message):
     """Sends a message to the Telegram bot."""
-    logging.info("message:"+message)
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
     payload = {'chat_id': telegram_chat_id, 'text': message}
     try:
@@ -91,6 +90,7 @@ class ObjectDetector(threading.Thread):
                 if filtered_detections:
                     sorted_detections = sorted(filtered_detections.items(), key=lambda item: item[1], reverse=True)
                     message = "Object detection report:\n\n" + "\n".join([f"{label}: {count}" for label, count in sorted_detections])
+                    logging.info("message: %s", message)
                     telegram_message(message)
                 with self.lock:
                     self.detection_counter.clear()
